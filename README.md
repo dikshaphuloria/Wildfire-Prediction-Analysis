@@ -26,7 +26,7 @@ The various data sources used are listed in the table below:
 
 ## Our Project Summary Can be Found:
 
-[Visualization](https://dikshaphuloria.github.io/Wildfire-Prediction-Analysis/Code/DataVisualization.nb.html)
+[VISUALIZATION](https://dikshaphuloria.github.io/Wildfire-Prediction-Analysis/Code/DataVisualization.nb.html)
 
 [METHODOLOGY (Fire Duration Prediction)](https://dikshaphuloria.github.io/Wildfire-Prediction-Analysis/Code/fire_duration_filtered_data.html)
 
