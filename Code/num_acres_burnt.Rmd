@@ -1,6 +1,6 @@
 ---
 title: "Number of Acres Burnt Prediction"
-author: "Anurag Mallick"
+author: "Shruti Elangovan, Diksha Phuloria, Anurag Mallick"
 date: "`r Sys.Date()`"
 output:
   html_document:
