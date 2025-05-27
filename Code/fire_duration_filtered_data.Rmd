@@ -1,0 +1,286 @@
+---
+title: "Fire Duration Prediction"
+author: "Shruti Elangovan, Diksha Phuloria, Anurag Mallick"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+fontsize: 12pt
+classoption: twoside
+---
+
+## METHODOLOGY
+
+> This study employed multiple approaches to model different aspects of wildfire risk. For each prediction task, we leveraged machine learning techniques and relevant predictor variables derived from historical and environmental datasets.
+>
+> Fire Duration Prediction: The performance of the Linear Regression Model was first evaluated using the coefficient of determination (R2) and the Mean Squared Error (MSE) on a test set. As indicated in the table below, the Linear Regression Model achieved an R2 value of 0.701 and a Test MSE of 1324.3043.
+>
+> Furthermore, we explored other models for fire duration prediction, such as Generalized Additive Model (GAM) and a Random Forest regressor. The performance metrics for these models are also presented in the table below, with the Random Forest model demonstrating the highest R2 value (0.816) and the lowest Test MSE (816.977) among the tested regression models.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(glmnet)
+library(randomForest)
+library(gam)
+library(car)
+library(janitor)
+```
+
+## Filtered Data -\> 15 days or greater Fire Duration
+
+```{r}
+data <- read.csv("../Data/WildFire_DataSet.csv")
+data_rel <- data |> filter(Fire_Duration>15)
+```
+
+### Linear Model Fit
+
+```{r}
+cov_columns <- c("min_temp","max_temp","avg_temp","avg_windspeed","avg_precipitation", "elevation", "landcover", "aspect", "slope", "ndvi", "avg_pdsi", "avg_spi30d")
+```
+
+```{r}
+set.seed(12345)
+trainIndex <- sample(1:nrow(data_rel), nrow(data_rel)*0.9)
+train_data <- data_rel[trainIndex, ]
+test_data <- data_rel[-trainIndex, ]
+
+fit_0 <- lm(Fire_Duration ~ ., data=train_data |> select(c(Fire_Duration, all_of(cov_columns))))
+
+summary(fit_0)
+```
+
+```{r, fig.height=6}
+plot(fit_0$residuals, fit_0$fitted.values, col="green4")
+```
+
+## Adding new variables
+
+We add new variables related to ndmi - Vegetation Moisture Index cause_description - Human-readable cause of fire fuel_type - Categorized burnable material
+
+```{r}
+cov_columns_new <- c("min_temp","max_temp","avg_temp","avg_windspeed","avg_precipitation", "elevation", "landcover", "aspect", "slope", "ndvi", "avg_pdsi", "avg_spi30d", "ndmi","fuel_type", "cause_description")
+```
+
+```{r}
+train_XY=train_data |> select(c(Fire_Duration, all_of(cov_columns_new)))
+```
+
+### Linear Model Fit
+
+```{r}
+fit_rel <- lm(Fire_Duration ~ .,data = train_XY)
+summary(fit_rel)
+```
+
+```{r}
+vif(fit_rel)
+```
+
+We see that there is very high collinearity in land_cover and fuel_type as they relate to the same identity of vegetation. We remove landcover and only use fuel_type for our variable selection and models from now on as fuel_type is more descriptive.
+
+Also min_temp, max_temp and avg_temp are collinear upto some extent and can be adjusted.
+
+### Only Variables with no collinearity
+
+```{r}
+cov_columns_ind <- c("min_temp","max_temp","avg_temp","avg_windspeed","avg_precipitation", "elevation", "aspect", "slope", "ndvi", "avg_pdsi", "avg_spi30d", "ndmi","fuel_type", "cause_description")
+```
+
+### Lasso Fit
+
+```{r}
+y <- data_rel$Fire_Duration
+x <- model.matrix(Fire_Duration ~ ., data=data_rel |> select(c(Fire_Duration, all_of(cov_columns_ind))) )
+
+set.seed(12345)
+trainIndex <- sample(1:nrow(x), nrow(x)*0.9)
+
+ytrain <- y[trainIndex]
+xtrain <- x[trainIndex,1:ncol(x)]
+```
+
+#### Variable selection using CV Lasso Model
+
+```{r}
+set.seed(1234)
+cv_fit <- cv.glmnet(xtrain, ytrain,alpha=1, nfolds = 5)
+```
+
+```{r, fig.height=6}
+plot(cv_fit)
+```
+
+```{r, fig.height=6}
+plot(cv_fit$glmnet.fit, xvar = "lambda")
+```
+
+We select the variables which are present in the Lasso Model with lowest cross validation error.
+
+```{r}
+coef_min <- coef(cv_fit, s = "lambda.min")
+sel_vars_min <- rownames(coef_min)[which(coef_min != 0)][-1]
+```
+
+```{r}
+sel_vars_min
+```
+
+## Different Fits
+
+We selected the top attributes and now we fit multiple models to increase the R2 and decrease Test MSE.
+
+### Getting the Model Matrix with selected variables only
+
+```{r}
+data_df=data_rel |> select(c(Fire_Duration, all_of(cov_columns_ind)))
+data_df <- data_df |> na.omit()
+```
+
+```{r}
+y <- data_df$Fire_Duration
+x <- model.matrix(Fire_Duration ~ . - 1, data=data_df)
+
+set.seed(1234)
+trainIndex <- sample(1:nrow(x), nrow(x)*0.9)
+
+# Train Model Matrix
+ytrain <- y[trainIndex]
+xtrain <- x[trainIndex,sel_vars_min]
+train_df <- as.data.frame(xtrain) |> mutate(Fire_Duration = ytrain)
+
+
+# Test Model Matrix
+ytest <- y[-trainIndex]
+xtest <- x[-trainIndex,sel_vars_min]
+test_df <- as.data.frame(xtest) |> mutate(Fire_Duration = ytest)
+```
+
+```{r}
+# Cleaning the data
+train_df <- clean_names(train_df)
+test_df <- clean_names(test_df)
+```
+
+### Linear Model Fit for selected vars
+
+```{r}
+ffit_lm <- lm(fire_duration ~ ., data = train_df)
+summary(ffit_lm)
+```
+
+#### Test MSE
+
+```{r}
+pred.test <- predict(ffit_lm, newdata = test_df)
+mean((pred.test-ytest)**2)
+```
+
+#### R2 Value
+
+```{r}
+test_TSS <- sum((test_df$fire_duration - mean(test_df$fire_duration))**2)
+test_RSS <- sum((pred.test - test_df$fire_duration)**2)
+ 
+cat(round(1 - test_RSS/test_TSS,3))
+```
+
+#### Plotting Residual Plot
+
+```{r, fig.height=6}
+ggplot() +
+  geom_point(mapping=aes(x=ffit_lm$fitted.values, y=ffit_lm$residuals), color="skyblue") +
+  xlab("Fitted Values")+
+  ylab("Residuals")+
+  theme_bw()
+```
+
+### GAM Model
+
+```{r}
+colnames(train_df)
+```
+
+```{r}
+formula_gam <- as.formula(
+  paste("fire_duration ~ s(`max_temp`) + s(`min_temp`) + s(`avg_temp`) + s(`avg_windspeed`)  + s(`elevation`) +
+  s(`avg_spi30d`) + `fuel_type_shrubland` + `fuel_type_urban` +
+  `cause_description_fireworks` + `cause_description_natural` + `cause_description_unknown` +
+  `cause_description_unknown_human` "))
+
+ffit_gam <- gam(formula_gam, data = train_df)
+```
+
+```{r}
+plot(ffit_gam)
+```
+
+#### Test MSE
+
+```{r}
+pred.test <- predict(ffit_gam, newdata = test_df)
+mean((pred.test-ytest)**2)
+```
+
+#### R2 Value
+
+```{r}
+test_TSS <- sum((test_df$fire_duration - mean(test_df$fire_duration))**2)
+test_RSS <- sum((pred.test - test_df$fire_duration)**2)
+ 
+cat(round(1 - test_RSS/test_TSS,3))
+```
+
+### Random Forest Regressor
+
+```{r}
+set.seed(123)  
+rf_model <- randomForest(
+  fire_duration ~ .,       
+  data = train_df,         
+  ntree = 1000,            
+  mtry = floor(sqrt(ncol(train_df))), 
+  importance = TRUE        
+)
+
+summary(rf_model)
+```
+
+#### Test MSE
+
+```{r}
+pred.test <- predict(rf_model, newdata = test_df)
+mean((pred.test-ytest)**2)
+```
+
+#### R2 Value
+
+```{r}
+test_TSS <- sum((test_df$fire_duration - mean(test_df$fire_duration))**2)
+test_RSS <- sum((pred.test - test_df$fire_duration)**2)
+ 
+cat(round(1 - test_RSS/test_TSS,3))
+```
+
+### Rpart Model
+
+```{r, fig.height=6}
+library(rpart)
+library(rpart.plot)
+
+# Fit tree
+tree_model <- rpart(fire_duration ~ ., data = train_df, method = "anova")
+
+# Plot the tree
+rpart.plot(tree_model)
+```
+
+```{r fig.height=10, fig.width=15}
+varImpPlot(rf_model)
+```

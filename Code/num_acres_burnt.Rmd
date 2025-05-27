@@ -1,0 +1,343 @@
+---
+title: "Number of Acres Burnt Prediction"
+author: "Anurag Mallick"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    df_print: paged
+fontsize: 12pt
+classoption: twoside
+---
+
+## METHODOLOGY
+
+> ***Acres Spread Prediction***: Predicting the precise number of acres burned presents a complex regression problem due to the highly dynamic nature of fire spread. To simplify the modeling task and address this complexity, we transformed the prediction of acres burned into a classification problem. Wildfire incidents were categorized into three spread levels based on the total acres burned.
+
+```         
+                                         Low Spread: < 100 acres
+                         
+                                       Medium Spread: 100-500 acres
+                       
+                                         High Spread: > 500 acres
+                      
+```
+
+> We implemented and evaluated three classification models for predicting these spread categories: Multinomial Logistic Regression Model, Random Forest classifier and XGBoost Classifier. The performance of these models was assessed using the misclassification error rate on both the training and testing datasets. The Random Forest classifier achieved a lower misclassification error on the test set (0.38) compared to the Multinomial Logistic Regression Model (0.53) and XGBoost (0.50),indicating better predictive performance for categorizing wildfire spread.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(glmnet)
+library(randomForest)
+library(xgboost)
+library(car)
+library(janitor)
+```
+
+## Acres Burnt
+
+```{r message=FALSE}
+data <- read.csv("../Data/WildFire_DataSet.csv")
+data_rel <- data |> filter(Fire_Duration>15)
+```
+
+## Processing num_acres burnt to classification
+
+```{r}
+dat <- data |> 
+  mutate(Acresbuckets = case_when(
+    incident_acres_burned <= 100 ~ 0,
+    incident_acres_burned > 100 & incident_acres_burned <= 500 ~ 1,
+    incident_acres_burned > 500 ~ 2
+  ))
+
+dat$Acresbuckets <- as.factor(dat$Acresbuckets)
+```
+
+```{r}
+dat |> group_by(Acresbuckets) |> 
+  summarize(n=n())
+```
+
+## EDA
+
+```{r}
+dat |> 
+  ggplot(mapping=aes(x=Fire_Duration, y=log_acres_burned))+
+  geom_point()
+```
+
+## Fitting Linear Model
+
+```{r}
+cov_columns_new <- c("min_temp","max_temp","avg_temp","avg_windspeed","avg_precipitation", "elevation", "landcover", "aspect", "slope", "ndvi", "avg_pdsi", "avg_spi30d", "ndmi","fuel_type", "cause_description")
+```
+
+### Model Matrix
+
+```{r}
+data_df_0 = dat |> select(c(log_acres_burned, all_of(cov_columns_new)))
+data_df_0 <- data_df_0 |> na.omit()
+```
+
+```{r}
+set.seed(1234)
+trainIndex <- sample(1:nrow(data_df_0), nrow(data_df_0)*0.9)
+
+# Train Model Matrix
+train_df <- data_df_0[trainIndex,1:ncol(data_df_0)]
+
+# Test Model Matrix
+test_df <- data_df_0[-trainIndex,1:ncol(data_df_0)]
+```
+
+### Linear Model Fit
+
+```{r}
+fit_lm <- lm(log_acres_burned ~ . -cause_description, data=train_df)
+summary(fit_lm)
+```
+
+```{r}
+vif(fit_lm)
+```
+
+### Random Forest Regressor
+
+```{r}
+set.seed(123)  
+rf_model_fd <- randomForest(
+  log_acres_burned ~ .,       
+  data = train_df,         
+  ntree = 1000,            
+  mtry = floor(sqrt(ncol(train_df) - 1)), 
+  importance = TRUE        
+)
+
+summary(rf_model_fd)
+```
+
+```{r}
+importance(rf_model_fd)
+```
+
+```{r}
+# Getting R2 value
+pred.test <- predict(rf_model_fd, newdata = test_df)
+
+test_TSS <- sum((test_df$log_acres_burned - mean(test_df$log_acres_burned))**2)
+test_RSS <- sum((pred.test - test_df$log_acres_burned)**2)
+ 
+cat(round(1 - test_RSS/test_TSS,3))
+```
+
+R2 values in regression models are reasonable. However, the distribution of Acres Burned is very noisy and hence can be easier to use a classification model.
+
+We also remove landcover from our model for fuel_type predictor.
+
+## Getting Model Matrix for classification
+
+```{r}
+cov_columns_class <- c("min_temp","max_temp","avg_temp","avg_windspeed","avg_precipitation", "elevation", "aspect", "slope", "ndvi", "avg_pdsi", "avg_spi30d", "ndmi","fuel_type", "cause_description")
+```
+
+```{r}
+data_df = dat |> select(c(Acresbuckets, all_of(cov_columns_class)))
+data_df <- data_df |> na.omit()
+```
+
+```{r}
+set.seed(1234)
+trainIndex_cls <- sample(1:nrow(data_df), nrow(data_df)*0.9)
+
+# Train Model Matrix
+train_df <- data_df[trainIndex_cls,1:ncol(data_df)]
+
+# Test Model Matrix
+test_df <- data_df[-trainIndex_cls,1:ncol(data_df)]
+```
+
+```{r}
+data_df |> group_by(Acresbuckets) |> 
+  summarize(n=n())
+```
+
+## Fitting Logistic Model Multinomial
+
+```{r}
+library(nnet)
+```
+
+```{r}
+fit_nnet <- multinom(Acresbuckets ~ ., data=train_df)
+summary(fit_nnet)
+```
+
+### Test Misclassification Error
+
+```{r}
+# Predict on test data
+test_preds <- predict(fit_nnet, newdata = test_df)
+mean(predict(fit_nnet, newdata = test_df) != test_df$Acresbuckets)
+```
+
+```{r}
+mean(predict(fit_nnet, newdata = train_df) != train_df$Acresbuckets)
+```
+
+```{r}
+table(test_preds, test_df$Acresbuckets)
+```
+
+## Random Forest Fit
+
+### Doing Cross Validation for best mtry
+
+```{r}
+set.seed(123)
+train_error <- rep(NA,ncol(train_df)-1)
+test_error <- rep(NA, ncol(test_df)-1)
+
+p <- ncol(train_df)-1
+
+for (m in 1:p){
+  rf.fit <- randomForest(Acresbuckets ~ .,data = train_df,
+                           ntree = 500, mtry = m,importance = TRUE,maxnodes =10)
+  
+  # Train and Test Error
+  train_error[m] <- mean(predict(rf.fit, newdata = train_df) != train_df$Acresbuckets)
+  test_error[m] <- mean(predict(rf.fit, newdata = test_df) != test_df$Acresbuckets)
+
+}
+```
+
+```{r}
+par(bg = "lightgray")
+
+plot(1:p, train_error, type = "b", col = "#12b59a", pch = 19,
+     xlab = "mtry", 
+     ylab = "Misclassification Error",
+     main = "Train and Test Error vs mtry",
+     ylim = range(c(train_error, test_error)))  
+
+lines(1:p, test_error, type = "b", col = "#bd552f", pch = 17)
+
+legend("topright", legend = c("Train Error", "Test Error"),
+       col = c("#12b59a", "#bd552f"), pch = c(19, 17), lty = 1)
+```
+
+### Using the best mtry to fit the model
+
+```{r}
+set.seed(123)
+library(randomForest)
+# Fit the random forest model
+rf_model_cls <- randomForest(
+  Acresbuckets ~ .,
+  data = train_df,
+  ntree = 1000, 
+  mtry = 12,
+  importance = TRUE,
+  maxnodes = 10
+)
+```
+
+```{r}
+mean(predict(rf_model_cls, newdata = train_df) != train_df$Acresbuckets)
+```
+
+```{r}
+mean(predict(rf_model_cls, newdata = test_df) != test_df$Acresbuckets)
+```
+
+## XGB Model
+
+### Creating the model matrix for XGB
+
+```{r}
+y <- as.integer(data_df$Acresbuckets) - 1
+X <- model.matrix(Acresbuckets ~ . -1, data=data_df)
+
+set.seed(123)
+trainIndex_xgb <- sample(1:nrow(data_df_0), nrow(data_df_0)*0.8)
+
+
+# Train Matrix XGB
+y_train_xgb <- y[trainIndex_xgb]
+X_train <- X[trainIndex_xgb,1:ncol(X)]
+
+# Test Matrix
+y_test_xgb <- y[-trainIndex_xgb]
+X_test <- X[-trainIndex_xgb,1:ncol(X)]
+```
+
+### Fit a standard model
+
+```{r}
+model <- xgboost(X_train, y_train_xgb, verbose=FALSE,
+  num_class = 3, nrounds = 10, params = list(objective="multi:softmax"))
+```
+
+```{r}
+# Test Error Rate
+pred_class_index <- predict(model, newdata = X_test)
+mean(pred_class_index != y_test_xgb)
+```
+
+### Tune with multiple rounds - [maxdepth, colsample_bytree]
+
+```{r}
+n_rounds <- 10
+train_error_xgb <- rep(NA, n_rounds)
+test_error_xgb <- rep(NA, n_rounds)
+
+set.seed(123)
+
+for(num_round in 1:n_rounds){
+  cat(num_round,"\n")
+  model_xgb_cls <- xgboost(X_train, y_train_xgb, verbose=FALSE, num_class = 3, nrounds = num_round, params = list(max_depth=4, colsample_bytree=0.8, eta=0.5, objective="multi:softmax"))
+  
+  # Train Data
+  pred_train_xgb <- predict(model_xgb_cls, newdata = X_train)
+  train_error_xgb[num_round] <- mean(pred_train_xgb!=y_train_xgb)
+  
+  # Test Data
+  pred_test_xgb <- predict(model_xgb_cls, newdata = X_test)
+  test_error_xgb[num_round] <- mean(pred_test_xgb!=y_test_xgb)
+}
+
+```
+
+```{r}
+plot(1:n_rounds, train_error_xgb, type = "b", col = "#12b59a", pch = 19,
+     ylim = range(c(train_error_xgb, test_error_xgb)))  
+
+lines(1:n_rounds, test_error_xgb, type = "b", col = "#bd552f", pch = 17)
+
+legend("topright", legend = c("Train Error", "Test Error"),
+       col = c("#12b59a", "#bd552f"), pch = c(19, 17), lty = 1)
+```
+
+### Fitting with the best model
+
+```{r}
+test_error_xgb[which.min(test_error_xgb)]
+```
+
+## Rpart Model
+
+```{r, fig.height=12, fig.width=14}
+library(rpart)
+library(rpart.plot)
+
+# Fit tree
+tree_model <- rpart(Acresbuckets ~ .,data = train_df, method = "anova")
+
+# Plot the tree
+rpart.plot(tree_model)
+```

@@ -1,0 +1,212 @@
+---
+title: "Data Mining Project"
+subtitle: "California Wildfire Prediction"
+author: "Shruti Elangovan, Anurag Mallik, Diksha Phuloria"
+date: "04/07/2025"
+output: 
+  html_notebook:
+    toc: False
+---
+
+# Introduction and Background
+> Wildfires are growing in both frequency and intensity. This worrying trend is largely linked to global warming, human activities that impact the environment, and natural ecological shifts. The significant damage caused by these events underscores the urgent need for reliable tools that can predict wildfire risk, allowing for better preparation and response.
+>
+> This project investigates the application of predictive algorithms to forecast critical wildfire characteristics in California, specifically focusing on the duration of active burning (persistence) and the potential for fire expansion (spread risk). Utilizing a comprehensive dataset of historical wildfire incidents and relevant environmental variables, we developed and evaluated predictive models for these key wildfire attributes. The results of this project demonstrate the potential of offering valuable insights for proactive mitigation and resource allocation in this fire-prone region.
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(glmnet)
+library(BART)
+library(randomForest)
+library(ggplot2)
+library(readxl)
+library(plotly)
+library(ggcorrplot)
+library(patchwork)
+```
+
+```{r}
+data <- read.csv("../Data/WildFire_DataSet.csv")
+```
+
+```{r}
+data |> head(5)
+```
+
+```{r}
+glimpse(data)
+```
+
+## Data Cleaning 
+
+```{r, fig.height=12, fig.width=8}
+library(naniar)
+gg_miss_var(data) + labs(title = "Missing Data by Variable", y="Missing Counts")
+```
+
+```{r}
+head(data)
+```
+
+```{r}
+#Extracting Total Fire Duration 
+year_fire <- data %>%
+  group_by(Year_Started) %>%
+  summarise(Total_Fire_Duration = sum(Fire_Duration, na.rm = TRUE), num_fire = n()) %>%
+  mutate(avg_fire_dur = Total_Fire_Duration/num_fire) |> 
+  dplyr::ungroup()
+
+year_fire |> head(15)
+```
+
+## Exploratory Data Analysis
+
+```{r, fig.width=10, warning=FALSE}
+# Create each plot
+p1 <- ggplot(data, aes(x = Year_Started)) +
+  geom_bar(fill = "firebrick") +
+  theme_linedraw() +
+  labs(title = "Number of Fires per Year", x = "Year", y = "Count")
+  
+
+p2 <- ggplot(year_fire, aes(x = as.factor(Year_Started), y = avg_fire_dur)) +
+  geom_bar(stat = "identity", fill = "red") +
+  labs(
+    title = "Fire Duration According to the Year",
+    x = "Year",
+    y = "Fire Duration in Days"
+  ) +
+  scale_x_discrete(limits = as.character(2013:2023)) +
+  theme_linedraw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Combine them side by side
+p1 + p2
+```
+
+> The bar charts displays the frequency and the total fire duration (in days) per year from 2013 to 2022. It highlights a dramatic spike in fire duration during 2017 and 2018, indicating those years experienced significantly longer wildfire events compared to other years in the dataset.
+
+```{r}
+# Compute average acres burned per fuel type
+fuel_stats <- data %>%
+  group_by(fuel_type) %>%
+  summarise(avg_acres_burned = mean(incident_acres_burned, na.rm = TRUE)) %>%
+  arrange(desc(avg_acres_burned))
+
+# Plot
+ggplot(fuel_stats, aes(x = reorder(fuel_type, -avg_acres_burned), y = avg_acres_burned)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_linedraw() +
+  labs(title = "Average Acres Burned by Fuel Type",
+       x = "Fuel Type", y = "Average Acres Burned") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+>This bar chart displays the average acres burned by different fuel types. Forests have the highest average area burned, followed by shrubland and grassland. Non-burnable and barren areas show minimal fire impact.
+
+
+```{r}
+data_new = data
+data_new %>%
+  count(fuel_type, sort = TRUE) %>%
+  ggplot(aes(x = reorder(fuel_type, -n), y = n)) +
+  geom_bar(stat = "identity", fill = "forestgreen") +
+  labs(title = "Number of Incidents by Fuel Type", x = "Fuel Type", y = "Count") +
+  theme_linedraw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+> This bar chart illustrates the number of fire incidents by fuel type. Urban, shrubland, and grassland areas report the highest incident counts. Despite forests having fewer incidents, they tend to result in larger burned areas compared to other types.
+
+## Geographical Scatter Plot
+
+> The map below displays the geographic distribution of wildfire ignition points across California, marked by red dots. It shows a high concentration of wildfire starts, highlighting areas most prone to fire activity.
+
+```{r,fig.width=10, warning=FALSE}
+df_train <- data %>%
+  mutate(scaled_size = pmin(sqrt(incident_acres_burned) * 0.2))  # Cap at 15
+
+# Create scatter map with better visibility
+fig_location <- plot_ly(
+  data = data,
+  type = "scattermapbox",
+  lon = ~incident_longitude,
+  lat = ~incident_latitude,
+  text = ~paste("Acres Burned:", incident_acres_burned),
+  marker = list(color = "red"),
+  mode = "markers"
+) %>%
+  layout(
+    title = "Fire Locations",
+    mapbox = list(
+      style = "carto-positron",
+      zoom = 5,  # Adjust zoom level
+      center = list(
+        lon = mean(data$incident_longitude, na.rm = TRUE),
+        lat = mean(data$incident_latitude, na.rm = TRUE)
+      )
+    )
+  )
+
+# Show the plot
+fig_location
+```
+
+## Wildfire Analysis by Weather Factors
+
+```{r, fig.width=12}
+# Create individual scatter plots
+p1 <- ggplot(data, aes(x = avg_windspeed, y = incident_acres_burned)) +geom_point(color = "blue") +theme_grey()
+
+p2 <- ggplot(data, aes(x = avg_temp, y = incident_acres_burned)) +geom_point(color = "red") +theme_grey()
+
+p3 <- ggplot(data, aes(x = avg_precipitation, y = incident_acres_burned)) +geom_point(color = "green4") +theme_grey()
+# Arrange plots in a row with consistent sizing and shared Y axis
+fig <- subplot(p1, p2, p3, nrows = 1, shareY = TRUE, titleX = TRUE, titleY = TRUE, widths = c(0.33, 0.33, 0.33)) %>%
+  layout(
+    title = list(
+      text = "Wildfire Analysis by Weather Factors",  
+      x = 0.5,    
+      xanchor = "center",
+      font = list(size = 20)  
+    ),
+    showlegend = TRUE,
+    margin = list(l = 50, r = 50, b = 100, t = 100),
+    xaxis = list(title = "Avg Wind Speed", zeroline = FALSE),
+    xaxis2 = list(title = "Avg Temperature", zeroline = FALSE),
+    xaxis3 = list(title = "Avg Precipitation", zeroline = FALSE),
+    yaxis = list(title = "Acres Burned")
+  )
+
+fig
+```
+
+## Correlation Heat Map
+
+> The heatmap illustrates the correlation between various features related to wildfire behavior and environmental conditions. Notably, minimum temperature shows a strong positive correlation with maximum temperature (0.84) and a strong negative correlation with fire duration (-0.78).
+
+```{r, fig.height=10, fig.width=10}
+# Select specific columns from df2
+df_cor <- data %>%
+  select(Fire_Duration, incident_acres_burned, min_temp, max_temp, avg_temp, avg_windspeed,
+         avg_precipitation, elevation,aspect, slope, ndvi, avg_pdsi, avg_spi30d, ndmi)
+
+# Compute correlation matrix
+cor_matrix <- cor(df_cor, use = "complete.obs")
+
+# Plot correlation heatmap
+ggcorrplot(cor_matrix, 
+           method = "square", 
+           type = "lower", 
+           lab = TRUE, 
+           lab_size = 5, 
+           colors = c("blue", "white", "red"),
+           title = "Feature Correlation Heatmap") +
+  theme_linedraw()+
+  theme(
+    axis.text.x = element_text(face = "bold", size = 12, angle = 90),
+    axis.text.y = element_text(face = "bold", size = 12),
+    plot.title = element_text(face = "bold", size = 20, hjust = 0.5)
+  )
+```
